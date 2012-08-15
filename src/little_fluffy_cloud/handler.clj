@@ -1,21 +1,56 @@
 (ns little-fluffy-cloud.handler
-  "A little REST-based cloud provider
-
-  Start a VM:
-    curl -X POST -H \"Content-Type: application/json\" http://localhost:3000/vms/test-01
-  or
-    "
+  "A little REST-based cloud provider using VirtualBox via VMFest"
   (:use compojure.core
         [ring.middleware.json :only [wrap-json-response wrap-json-params]]
-        [ring.util.response :only [response]])
+        [ring.util.response :only [response]]
+        [vmfest.virtualbox.image :only [setup-model]]
+        [vmfest.virtualbox.session :only (with-vbox)])
   (:require [compojure.handler :as handler]
             [compojure.route :as route]
-            [vmfest.manager :as vmfest]
-            [vmfest.virtualbox.machine :as machine]))
+            [vmfest.manager :as vmfest]))
 
 (def ^:dynamic *vbox-server* (vmfest/server "http://localhost:18083"))
 (def ^:dynamic *default-image* :debian-6.0.2.1-64bit-v0.3)
 (def ^:dynamic *default-hardware* :micro)
+
+(def ^:dynamic *image-url-template*
+  #_"file:///Volumes/DATA/VMFEST_IMG/vmfest-test/%s.vdi.gz"
+  "https://s3.amazonaws.com/vmfest-images/%s.vdi.gz" )
+(defn default-img-installed? []
+  (some #(= % *default-image*) (vmfest/models)))
+
+(defn default-image-url []
+  (format *image-url-template* (name *default-image*)))
+
+(defn install-default-image []
+  (when-not (default-img-installed?)
+    (setup-model (default-image-url) *vbox-server*)))
+
+(defn vbox-webserver-accessible? []
+  (try (with-vbox *vbox-server* [mgr vbox]
+         (.getVersion vbox)
+         true)
+       (catch Exception e nil)))
+
+(def status-ok {:status :OK})
+(def status-default-image-missing
+  {:status :ERROR
+   :message (str "The default image model needs to be installed by "
+                 "visiting http://localhost:3000/install-default-image")})
+(def status-vbox-not-accessible
+  {:status :ERROR
+   :message
+   (str "The VirtualBox server is not accessible. Check that:\n"
+        "1- VirtualBox 4.1.x (latest) is installed\n"
+        "2- VirtualBox server is started: 'vboxwebsrv -t0' at the command line\n"
+        "3- VirtualBox is configured to work without passwords: 'VBoxManage setproperty websrvauthlibrary null' at the command line\n")})
+
+(defn install-check []
+  (if (vbox-webserver-accessible?)
+    (if (default-img-installed?)
+      status-ok
+      status-default-image-missing)
+    status-vbox-not-accessible))
 
 (defn find-vm [name]
   (vmfest/find-machine *vbox-server* name))
@@ -46,7 +81,12 @@
     model))
 
 (defroutes app-routes
-  (GET "/" [] (response {:server (:url *vbox-server*)}))
+  (GET "/" [] (response (install-check)))
+  (GET "/install-default-image" []
+       (response
+        (if (install-default-image)
+          {:status :OK :message "Image installed"}
+          {:status :OK :message "Image already installed"})))
   (GET "/images" [] (response {:images (map name (vmfest/models))}))
   (GET "/images/:name" [name]
        (response (vmfest/model-info (keyword name))))
